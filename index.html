@@ -111,8 +111,9 @@
             </div>
             <div class="input-card">
                 <input type="text" id="user-name" placeholder="आपका प्यारा नाम..." autocomplete="off">
-                <button class="start-btn" onclick="joinChat()">चैट शुरू करें</button>
+                <button class="start-btn" id="start-btn" onclick="joinChat()">चैट शुरू करें</button>
             </div>
+            <p id="status-text" style="margin-top:20px; font-size:0.7rem; color:gray;"></p>
         </div>
     </div>
 
@@ -139,7 +140,7 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, serverTimestamp, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
         const firebaseConfig = {
@@ -154,83 +155,115 @@
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
-        // Updated appId for fresh connection
+        
+        // App ID is very important. Ensure this matches your Firestore Rules
         const appId = "global-cinematic-prod-v2";
 
         let currentUser = null;
         let myName = "";
         let activePrivateUser = null;
 
+        const setStatus = (msg) => {
+            document.getElementById('status-text').innerText = msg;
+        };
+
         window.joinChat = async () => {
             myName = document.getElementById('user-name').value.trim();
             if(!myName) return;
-            document.getElementById('setup-ui').style.display = 'none';
-            document.getElementById('input-bar').style.display = 'flex';
-            document.getElementById('sidebar').style.display = 'flex';
-            await signInAnonymously(auth);
+            
+            const btn = document.getElementById('start-btn');
+            btn.disabled = true;
+            btn.innerText = "Connecting...";
+            setStatus("Firebase से जुड़ रहे हैं...");
+
+            try {
+                await signInAnonymously(auth);
+            } catch (error) {
+                console.error(error);
+                setStatus("Error: " + error.message);
+                btn.disabled = false;
+                btn.innerText = "चैट शुरू करें";
+            }
         };
 
-        onAuthStateChanged(auth, (user) => {
+        onAuthStateChanged(auth, async (user) => {
             if (user && myName) {
                 currentUser = user;
-                setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'online_users', user.uid), {
-                    name: myName, uid: user.uid, lastSeen: serverTimestamp()
-                }, { merge: true });
+                setStatus("ऑनलाइन आ रहे हैं...");
 
-                // Listen for Online Users
-                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'online_users'), (snap) => {
-                    const list = document.getElementById('online-list');
-                    list.innerHTML = '';
-                    snap.forEach(d => {
-                        const u = d.data();
-                        if(u.uid !== currentUser.uid) {
-                            const div = document.createElement('div');
-                            div.className = 'user-item';
-                            div.innerHTML = `<span style="color:#4ade80">●</span> ${u.name}`;
-                            div.onclick = () => openPrivateChat(u.uid, u.name);
-                            list.appendChild(div);
-                        }
-                    });
-                });
+                document.getElementById('setup-ui').style.display = 'none';
+                document.getElementById('input-bar').style.display = 'flex';
+                document.getElementById('sidebar').style.display = 'flex';
 
-                // Listen for Global Messages
-                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), (snap) => {
-                    snap.docChanges().forEach(change => {
-                        if (change.type === "added") {
-                            const data = change.doc.data();
-                            if(data.senderUid !== currentUser.uid) showCinematic(data);
-                        }
-                    });
-                });
+                try {
+                    // Update Online Status
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'online_users', user.uid), {
+                        name: myName, uid: user.uid, lastSeen: serverTimestamp()
+                    }, { merge: true });
 
-                // Listen for Private Messages
-                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'private_messages'), (snap) => {
-                    snap.docChanges().forEach(change => {
-                        if (change.type === "added") {
-                            const data = change.doc.data();
-                            if(data.to === currentUser.uid) {
-                                if(!activePrivateUser || activePrivateUser.uid !== data.from) {
-                                    showNotification(`नया संदेश: ${data.senderName}`);
-                                }
-                                if(activePrivateUser && activePrivateUser.uid === data.from) {
-                                    appendPrivateMessage(data.text, 'rec');
+                    // 1. Listen for Online Users
+                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'online_users'), (snap) => {
+                        const list = document.getElementById('online-list');
+                        list.innerHTML = '';
+                        snap.forEach(d => {
+                            const u = d.data();
+                            if(u.uid !== currentUser.uid) {
+                                const div = document.createElement('div');
+                                div.className = 'user-item';
+                                div.innerHTML = `<span style="color:#4ade80">●</span> ${u.name}`;
+                                div.onclick = () => openPrivateChat(u.uid, u.name);
+                                list.appendChild(div);
+                            }
+                        });
+                    }, (err) => console.error("Online list error:", err));
+
+                    // 2. Listen for Global Messages
+                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), (snap) => {
+                        snap.docChanges().forEach(change => {
+                            if (change.type === "added") {
+                                const data = change.doc.data();
+                                if(data.senderUid !== currentUser.uid) showCinematic(data);
+                            }
+                        });
+                    }, (err) => console.error("Global msg error:", err));
+
+                    // 3. Listen for Private Messages
+                    onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'private_messages'), (snap) => {
+                        snap.docChanges().forEach(change => {
+                            if (change.type === "added") {
+                                const data = change.doc.data();
+                                if(data.to === currentUser.uid) {
+                                    if(!activePrivateUser || activePrivateUser.uid !== data.from) {
+                                        showNotification(`नया संदेश: ${data.senderName}`);
+                                    }
+                                    if(activePrivateUser && activePrivateUser.uid === data.from) {
+                                        appendPrivateMessage(data.text, 'rec');
+                                    }
                                 }
                             }
-                        }
-                    });
-                });
+                        });
+                    }, (err) => console.error("Private msg error:", err));
+
+                } catch (e) {
+                    console.error("Firestore Error:", e);
+                    alert("Firestore Access Denied. Please check Rules.");
+                }
             }
         });
 
         window.sendMessage = async () => {
             const input = document.getElementById('msg-input');
             const text = input.value.trim();
-            if(!text) return;
-            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), {
-                text, sender: myName, senderUid: currentUser.uid, createdAt: serverTimestamp()
-            });
-            showCinematic({ text, sender: 'Me', senderUid: currentUser.uid });
-            input.value = '';
+            if(!text || !currentUser) return;
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), {
+                    text, sender: myName, senderUid: currentUser.uid, createdAt: serverTimestamp()
+                });
+                showCinematic({ text, sender: 'Me', senderUid: currentUser.uid });
+                input.value = '';
+            } catch(e) {
+                alert("मैसेज नहीं जा सका: " + e.message);
+            }
         };
 
         window.openPrivateChat = (uid, name) => {
@@ -248,13 +281,17 @@
         window.sendPrivateMessage = async () => {
             const input = document.getElementById('pc-input');
             const text = input.value.trim();
-            if(!text || !activePrivateUser) return;
-            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'private_messages'), {
-                text, from: currentUser.uid, to: activePrivateUser.uid,
-                senderName: myName, createdAt: serverTimestamp()
-            });
-            appendPrivateMessage(text, 'sent');
-            input.value = '';
+            if(!text || !activePrivateUser || !currentUser) return;
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'private_messages'), {
+                    text, from: currentUser.uid, to: activePrivateUser.uid,
+                    senderName: myName, createdAt: serverTimestamp()
+                });
+                appendPrivateMessage(text, 'sent');
+                input.value = '';
+            } catch(e) {
+                alert("प्राइवेट मैसेज एरर: " + e.message);
+            }
         };
 
         function appendPrivateMessage(text, type) {
